@@ -59,7 +59,11 @@ function AddMedia(data, currentTab = true) {
     data._title = data.title;
     data.title = stringModify(data.title);
     //文件名
-    data.name = isEmpty(data.name) ? data.title + '.' + data.ext : decodeURIComponent(stringModify(data.name));
+    if (shouldUseMetaMediaName(data)) {
+        data.name = buildDefaultMediaName(data);
+    } else {
+        data.name = isEmpty(data.name) ? buildDefaultMediaName(data) : decodeURIComponent(stringModify(data.name));
+    }
     //截取文件名长度
     let trimName = data.name;
     if (data.name && data.name.length >= 50 && !_tabId) {
@@ -421,6 +425,21 @@ function AddMedia(data, currentTab = true) {
     duplicateFilenamesSet && duplicateFilenamesSet.add(data.name);
 
     return data.html;
+}
+function UpdateMedia(data, currentTab = true) {
+    const mediaMap = allData.get(currentTab);
+    const oldData = mediaMap.get(data.requestId);
+    if (!oldData) {
+        return AddMedia(data, currentTab);
+    }
+    const mergedData = { ...oldData, ...data };
+    mergedData.requestId = oldData.requestId;
+    mergedData._checked = oldData.checked;
+    mediaMap.delete(oldData.requestId);
+    const newHtml = AddMedia(mergedData, currentTab);
+    mergedData.checked = oldData.checked;
+    oldData.html.replaceWith(newHtml);
+    return newHtml;
 }
 
 function AddKey(key) {
@@ -815,6 +834,12 @@ const interval = setInterval(async function () {
                 $all.append(html);
                 UItoggle();
             }
+            sendResponse("OK");
+            return true;
+        }
+        if (Message.Message == "popupUpdateData") {
+            const isCurrentTab = Message.data.tabId == G.tabId;
+            UpdateMedia(Message.data, isCurrentTab);
             sendResponse("OK");
             return true;
         }

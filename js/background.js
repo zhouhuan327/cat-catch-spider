@@ -214,7 +214,7 @@ function findMedia(data, isRegex = false, filter = false, timer = false) {
             data.cookie = data.requestHeaders.cookie;
             data.requestHeaders.cookie = undefined;
         }
-        const info = {
+        let info = {
             name: name,
             url: data.url,
             size: data.header?.size,
@@ -243,6 +243,7 @@ function findMedia(data, isRegex = false, filter = false, timer = false) {
         }
         // 装载页面信息
         info.title = webInfo?.title ?? "NULL";
+        info.pageTitle = info.title;
         info.favIconUrl = webInfo?.favIconUrl;
         info.webUrl = webInfo?.url;
         // 屏蔽资源
@@ -250,51 +251,266 @@ function findMedia(data, isRegex = false, filter = false, timer = false) {
             G.blackList.delete(data.requestId);
             return;
         }
-        // 发送到popup 并检查自动下载
-        chrome.runtime.sendMessage({ Message: "popupAddData", data: info }, function () {
-            if (G.featAutoDownTabId.size > 0 && G.featAutoDownTabId.has(info.tabId) && chrome.downloads?.State) {
-                try {
-                    const downDir = info.title == "NULL" ? "CatCatch/" : stringModify(info.title) + "/";
-                    let fileName = isEmpty(info.name) ? stringModify(info.title) + '.' + info.ext : decodeURIComponent(stringModify(info.name));
-                    if (G.TitleName) {
-                        fileName = filterFileName(templates(G.downFileName, info));
-                    } else {
-                        fileName = downDir + fileName;
-                    }
-                    chrome.downloads.download({
-                        url: info.url,
-                        filename: fileName
-                    });
-                } catch (e) { return; }
+        getTabPageMeta(info.tabId, webInfo, function (pageMeta) {
+            if (pageMeta) {
+                info = mergePageMeta(info, pageMeta);
             }
-            if (chrome.runtime.lastError) { return; }
+            // 发送到popup 并检查自动下载
+            chrome.runtime.sendMessage({ Message: "popupAddData", data: info }, function () {
+                if (G.featAutoDownTabId.size > 0 && G.featAutoDownTabId.has(info.tabId) && chrome.downloads?.State) {
+                    try {
+                        const downDir = info.title == "NULL" ? "CatCatch/" : stringModify(info.title) + "/";
+                        let fileName = isEmpty(info.name) ? stringModify(info.title) + '.' + info.ext : decodeURIComponent(stringModify(info.name));
+                        if (G.TitleName) {
+                            fileName = filterFileName(templates(G.downFileName, info));
+                        } else {
+                            fileName = downDir + fileName;
+                        }
+                        chrome.downloads.download({
+                            url: info.url,
+                            filename: fileName
+                        });
+                    } catch (e) { return; }
+                }
+                if (chrome.runtime.lastError) { return; }
+            });
+
+            // 数据发送
+            if (G.send2local) {
+                try { send2local("catch", { ...info, requestHeaders: data.allRequestHeaders }, info.tabId); } catch (e) { console.log(e); }
+            }
+
+            // 储存数据
+            cacheData[info.tabId] ??= [];
+            cacheData[info.tabId].push(info);
+
+            // 当前标签媒体数量大于100 开启防抖 等待5秒储存 或 积累10个资源储存一次。
+            if (cacheData[info.tabId].length >= 100 && debounceCount <= 10) {
+                debounceCount++;
+                clearTimeout(debounce);
+                debounce = setTimeout(function () { save(info.tabId); }, 5000);
+                return;
+            }
+            // 时间间隔小于500毫秒 等待2秒储存
+            if (Date.now() - debounceTime <= 500) {
+                clearTimeout(debounce);
+                debounceTime = Date.now();
+                debounce = setTimeout(function () { save(info.tabId); }, 2000);
+                return;
+            }
+            save(info.tabId);
         });
-
-        // 数据发送
-        if (G.send2local) {
-            try { send2local("catch", { ...info, requestHeaders: data.allRequestHeaders }, info.tabId); } catch (e) { console.log(e); }
-        }
-
-        // 储存数据
-        cacheData[info.tabId] ??= [];
-        cacheData[info.tabId].push(info);
-
-        // 当前标签媒体数量大于100 开启防抖 等待5秒储存 或 积累10个资源储存一次。
-        if (cacheData[info.tabId].length >= 100 && debounceCount <= 10) {
-            debounceCount++;
-            clearTimeout(debounce);
-            debounce = setTimeout(function () { save(info.tabId); }, 5000);
-            return;
-        }
-        // 时间间隔小于500毫秒 等待2秒储存
-        if (Date.now() - debounceTime <= 500) {
-            clearTimeout(debounce);
-            debounceTime = Date.now();
-            debounce = setTimeout(function () { save(info.tabId); }, 2000);
-            return;
-        }
-        save(info.tabId);
     });
+}
+function shouldCapturePageMeta(url) {
+    if (!url) { return false; }
+    try {
+        return /(^|\.)xiaohongshu\.com$/i.test(new URL(url).hostname);
+    } catch (e) {
+        return false;
+    }
+}
+function hasMeaningfulPageMeta(pageMeta) {
+    if (!pageMeta || typeof pageMeta != "object") { return false; }
+    return Boolean(
+        pageMeta.noteTitle ||
+        pageMeta.noteDesc ||
+        pageMeta.authorName ||
+        pageMeta.likeCount ||
+        pageMeta.collectCount ||
+        pageMeta.commentCount ||
+        pageMeta.shareCount ||
+        pageMeta.noteId
+    );
+}
+function hasPreferredXhsPageMeta(pageMeta) {
+    if (!pageMeta || typeof pageMeta != "object") { return false; }
+    return Boolean(
+        pageMeta.authorName ||
+        pageMeta.likeCount ||
+        pageMeta.collectCount ||
+        pageMeta.commentCount ||
+        pageMeta.shareCount
+    );
+}
+function getTabPageMeta(tabId, webInfo, callback) {
+    if (!tabId || tabId <= 0 || !shouldCapturePageMeta(webInfo?.url)) {
+        callback(false);
+        return;
+    }
+    const cache = G.pageMetaCache.get(tabId);
+    if (cache && (Date.now() - cache.time) <= 3000 && (cache.url == webInfo.url || cache.data?.pageUrl == webInfo.url || !webInfo?.url)) {
+        callback(cache.data);
+        return;
+    }
+    let retryCount = 0;
+    const maxRetry = 20;
+    const retryDelay = 400;
+    const tryFetch = function () {
+        chrome.tabs.sendMessage(tabId, { Message: "getPageMeta" }, { frameId: 0 }, function (pageMeta) {
+            const hasError = chrome.runtime.lastError || !pageMeta || typeof pageMeta != "object";
+            const hasMeta = !hasError && hasMeaningfulPageMeta(pageMeta);
+            const hasPreferredMeta = !hasError && hasPreferredXhsPageMeta(pageMeta);
+            if (hasPreferredMeta || (hasMeta && retryCount >= maxRetry - 1)) {
+                G.pageMetaCache.set(tabId, {
+                    url: webInfo?.url,
+                    time: Date.now(),
+                    data: pageMeta
+                });
+                callback(pageMeta);
+                return;
+            }
+            retryCount++;
+            if (retryCount >= maxRetry) {
+                callback({
+                    site: "xiaohongshu",
+                    pageUrl: webInfo?.url,
+                    pageTitle: webInfo?.title || "",
+                    title: webInfo?.title || "",
+                    extractor: "missing",
+                    metaStatus: "missing"
+                });
+                return;
+            }
+            setTimeout(tryFetch, retryDelay);
+        });
+    };
+    tryFetch();
+}
+function shouldUpdateMediaWithPageMeta(info, pageMeta) {
+    if (!info || !pageMeta || pageMeta.site != "xiaohongshu") { return false; }
+    if (info.noteId && pageMeta.noteId && info.noteId != pageMeta.noteId) { return false; }
+    const missingMeta = !info.noteTitle && !info.noteDesc && !info.authorName && !info.likeCount && !info.collectCount && !info.commentCount && !info.shareCount;
+    const hasRicherMeta = Boolean(
+        (pageMeta.authorName && pageMeta.authorName != info.authorName) ||
+        (pageMeta.likeCount && pageMeta.likeCount != info.likeCount) ||
+        (pageMeta.collectCount && pageMeta.collectCount != info.collectCount) ||
+        (pageMeta.commentCount && pageMeta.commentCount != info.commentCount) ||
+        (pageMeta.shareCount && pageMeta.shareCount != info.shareCount) ||
+        (pageMeta.noteDesc && pageMeta.noteDesc != info.noteDesc)
+    );
+    return info.metaStatus == "missing" || missingMeta || shouldReplaceOpaqueName(info.name, info.ext) || hasRicherMeta;
+}
+function getMediaMetaSignature(info) {
+    return [
+        info?.title || "",
+        info?.name || "",
+        info?.pageTitle || "",
+        info?.pagePath || "",
+        info?.noteId || "",
+        info?.noteTitle || "",
+        info?.noteDesc || "",
+        info?.authorName || "",
+        info?.likeCount || "",
+        info?.collectCount || "",
+        info?.commentCount || "",
+        info?.shareCount || "",
+        info?.metaStatus || ""
+    ].join("::");
+}
+function updateCachedMediaWithPageMeta(tabId, pageMeta) {
+    if (!tabId || !hasMeaningfulPageMeta(pageMeta) || !cacheData[tabId]?.length) { return []; }
+    const updatedItems = [];
+    cacheData[tabId] = cacheData[tabId].map(function (item) {
+        if (!shouldUpdateMediaWithPageMeta(item, pageMeta)) {
+            return item;
+        }
+        const merged = mergePageMeta({ ...item }, pageMeta);
+        if (getMediaMetaSignature(item) == getMediaMetaSignature(merged)) {
+            return item;
+        }
+        updatedItems.push(merged);
+        return merged;
+    });
+    if (!updatedItems.length) { return updatedItems; }
+    save(tabId);
+    updatedItems.forEach(function (item) {
+        chrome.runtime.sendMessage({ Message: "popupUpdateData", data: item }, function () {
+            void chrome.runtime.lastError;
+        });
+    });
+    return updatedItems;
+}
+function mergePageMeta(info, pageMeta) {
+    if (!pageMeta) { return info; }
+    info.site = pageMeta.site || info.site;
+    info.pageUrl = pageMeta.pageUrl || info.webUrl;
+    info.pagePath = pageMeta.pagePath || "";
+    info.extractor = pageMeta.extractor || "";
+    info.noteId = pageMeta.noteId || info.noteId;
+    info.noteTitle = pageMeta.noteTitle || info.noteTitle || "";
+    info.noteDesc = pageMeta.noteDesc || info.noteDesc || "";
+    info.authorName = pageMeta.authorName || info.authorName || "";
+    info.likeCount = pageMeta.likeCount || info.likeCount || "";
+    info.collectCount = pageMeta.collectCount || info.collectCount || "";
+    info.commentCount = pageMeta.commentCount || info.commentCount || "";
+    info.shareCount = pageMeta.shareCount || info.shareCount || "";
+    info.metaCapturedAt = pageMeta.capturedAt || info.metaCapturedAt;
+    info.metaStatus = pageMeta.metaStatus || info.metaStatus || "";
+    if (pageMeta.pageTitle) {
+        info.pageTitle = pageMeta.pageTitle;
+    }
+    if (pageMeta.title) {
+        info.title = pageMeta.title;
+    } else if (info.noteTitle || info.noteDesc) {
+        info.title = info.noteTitle || info.noteDesc;
+    }
+    if (info.site == "xiaohongshu" && shouldUsePageMetaName(info)) {
+        info.originalName = info.originalName || info.name;
+        info.name = buildPageMetaName(info);
+    }
+    return info;
+}
+function shouldUsePageMetaName(info) {
+    if (info.site != "xiaohongshu") { return false; }
+    if (shouldReplaceOpaqueName(info.name, info.ext)) { return true; }
+    return Boolean(info.authorName || info.likeCount || info.collectCount || info.commentCount);
+}
+function shouldReplaceOpaqueName(name, ext) {
+    if (!name) { return true; }
+    const lowerName = name.toLowerCase();
+    if (ext && lowerName.endsWith("." + ext.toLowerCase())) {
+        name = name.slice(0, -(ext.length + 1));
+    }
+    name = name.trim();
+    if (!name) { return true; }
+    if (/^[0-9a-f]{16,}(_\d+)?$/i.test(name)) { return true; }
+    if (/^[0-9a-z_-]{24,}$/i.test(name) && !/[\u4e00-\u9fa5]/.test(name)) { return true; }
+    return false;
+}
+function buildPageMetaName(info) {
+    const parts = [];
+    if (info.authorName) {
+        parts.push(info.authorName);
+    }
+    const text = info.noteTitle || info.noteDesc || info.title || info.noteId || "xiaohongshu";
+    if (text) {
+        parts.push(text);
+    }
+    let baseName = parts.filter(Boolean).join("_").replace(/\s+/g, " ").trim();
+    if (!baseName) {
+        baseName = info.noteId || "xiaohongshu";
+    }
+    const stats = [];
+    if (info.likeCount) {
+        stats.push(`赞${info.likeCount}`);
+    }
+    if (info.collectCount) {
+        stats.push(`收藏${info.collectCount}`);
+    }
+    if (info.commentCount) {
+        stats.push(`评${info.commentCount}`);
+    }
+    if (stats.length) {
+        baseName += `_${stats.join("-")}`;
+    }
+    if (info.metaStatus == "missing" && !info.authorName && !info.noteTitle && !info.noteDesc && !info.likeCount && !info.collectCount && !info.commentCount && (!info.title || info.title == "NULL")) {
+        return `【未取到页面信息】_${info.originalName || info.name || "unknown"}`;
+    }
+    if (baseName.length > 80) {
+        baseName = baseName.slice(0, 80).trim();
+    }
+    return `${baseName}.${info.ext || "mp4"}`;
 }
 // cacheData数据 储存到 chrome.storage.local
 function save(tabId) {
@@ -328,6 +544,21 @@ chrome.runtime.onMessage.addListener(function (Message, sender, sendResponse) {
     if (Message.Message == "pushData") {
         (chrome.storage.session ?? chrome.storage.local).set({ MediaData: cacheData });
         sendResponse("ok");
+        return true;
+    }
+    if (Message.Message == "updatePageMeta") {
+        const tabId = sender?.tab?.id ?? Message.tabId;
+        const pageMeta = Message.data;
+        if (!tabId || !pageMeta || typeof pageMeta != "object") {
+            sendResponse("error");
+            return true;
+        }
+        G.pageMetaCache.set(tabId, {
+            url: sender?.tab?.url || pageMeta.pageUrl || "",
+            time: Date.now(),
+            data: pageMeta
+        });
+        sendResponse({ updated: updateCachedMediaWithPageMeta(tabId, pageMeta).length });
         return true;
     }
     // 获取所有数据
@@ -588,6 +819,7 @@ chrome.tabs.onUpdated.addListener(function (tabId, changeInfo, tab) {
     // console.log('onUpdated', tabId, changeInfo, tab);
     if (changeInfo.status && changeInfo.status == "loading" && G.autoClearMode == 2) {
         G.urlMap.delete(tabId);
+        G.pageMetaCache.delete(tabId);
         chrome.alarms.get("save", function (alarm) {
             if (!alarm) {
                 delete cacheData[tabId];
@@ -598,6 +830,7 @@ chrome.tabs.onUpdated.addListener(function (tabId, changeInfo, tab) {
     }
     // 检查当前标签是否在屏蔽列表中
     if (changeInfo.url && tabId > 0) {
+        G.pageMetaCache.delete(tabId);
         if (G.blockUrl.length) {
             G.blockUrlSet.delete(tabId);
             if (isLockUrl(changeInfo.url)) {
@@ -628,6 +861,7 @@ chrome.webNavigation.onCommitted.addListener(function (details) {
 
     // 刷新页面 检查是否在屏蔽列表中
     if (details.frameId == 0) {
+        G.pageMetaCache.delete(details.tabId);
         G.blockUrlSet.delete(details.tabId);
         if (isLockUrl(details.url)) {
             G.blockUrlSet.add(details.tabId);
@@ -691,6 +925,7 @@ chrome.tabs.onRemoved.addListener(function (tabId) {
     chrome.alarms.get("nowClear", function (alarm) {
         !alarm && chrome.alarms.create("nowClear", { when: Date.now() + 1000 });
     });
+    G.pageMetaCache.delete(tabId);
     if (G.initSyncComplete) {
         G.blockUrlSet.has(tabId) && G.blockUrlSet.delete(tabId);
         G.damnUrlSet.has(tabId) && G.damnUrlSet.delete(tabId);

@@ -48,6 +48,65 @@ function isMediaExt(ext) {
 function isMedia(data) {
     return isMediaExt(data.ext) || data.type?.startsWith("video/") || data.type?.startsWith("audio/");
 }
+function shouldReplaceOpaqueMediaName(data) {
+    if (data?.site != "xiaohongshu") { return false; }
+    let name = data?.name || "";
+    const ext = data?.ext || "";
+    if (!name) { return true; }
+    const lowerName = name.toLowerCase();
+    if (ext && lowerName.endsWith("." + ext.toLowerCase())) {
+        name = name.slice(0, -(ext.length + 1));
+    }
+    name = name.trim();
+    if (!name) { return true; }
+    if (/^[0-9a-f]{16,}(_\d+)?$/i.test(name)) { return true; }
+    if (/^[0-9a-z_-]{24,}$/i.test(name) && !/[\u4e00-\u9fa5]/.test(name)) { return true; }
+    return false;
+}
+function shouldUseMetaMediaName(data) {
+    if (data?.site != "xiaohongshu") { return false; }
+    if (shouldReplaceOpaqueMediaName(data)) { return true; }
+    return Boolean(data?.authorName || data?.likeCount || data?.collectCount || data?.commentCount);
+}
+function buildDefaultMediaName(data) {
+    const ext = data?.ext || "mp4";
+    if (data?.site == "xiaohongshu") {
+        const parts = [];
+        if (data.authorName) {
+            parts.push(data.authorName);
+        }
+        const text = data.noteTitle || data.noteDesc || data.title || data.noteId || "xiaohongshu";
+        if (text) {
+            parts.push(text);
+        }
+        let baseName = parts.filter(Boolean).join("_").replace(/\s+/g, " ").trim();
+        if (!baseName) {
+            baseName = data.noteId || "xiaohongshu";
+        }
+        const stats = [];
+        if (data.likeCount) {
+            stats.push(`赞${data.likeCount}`);
+        }
+        if (data.collectCount) {
+            stats.push(`收藏${data.collectCount}`);
+        }
+        if (data.commentCount) {
+            stats.push(`评${data.commentCount}`);
+        }
+        if (stats.length) {
+            baseName += `_${stats.join("-")}`;
+        }
+        if (data?.metaStatus == "missing" && !data.authorName && !data.noteTitle && !data.noteDesc && !data.likeCount && !data.collectCount && !data.commentCount && (!data.title || data.title == "NULL")) {
+            return `【未取到页面信息】_${data?.originalName || data?.name || "unknown"}`;
+        }
+        if (baseName.length > 80) {
+            baseName = baseName.slice(0, 80).trim();
+        }
+        return `${baseName}.${ext}`;
+    }
+    const title = data?.title || "NULL";
+    return `${title}.${ext}`;
+}
 /**
  * ari2a RPC发送一套资源
  * @param {object} data 资源对象

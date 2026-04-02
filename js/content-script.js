@@ -2,6 +2,464 @@
     var _videoObj = [];
     var _videoSrc = [];
     var _key = new Set();
+    const XHS_HOST_RE = /(^|\.)xiaohongshu\.com$/i;
+    let xhsMetaReportTimer = null;
+    let xhsMetaObserverStarted = false;
+    let xhsLastMetaSignature = "";
+
+    function normalizeText(text) {
+        return typeof text == "string" ? text.replace(/\s+/g, " ").trim() : "";
+    }
+    function firstText(selectors, root = document) {
+        for (const selector of selectors) {
+            try {
+                const dom = root.querySelector(selector);
+                const text = normalizeText(dom?.innerText || dom?.textContent || "");
+                if (text) { return text; }
+            } catch (e) { }
+        }
+        return "";
+    }
+    function firstMeta(selectors) {
+        for (const selector of selectors) {
+            try {
+                const dom = document.querySelector(selector);
+                const text = normalizeText(dom?.getAttribute("content") || "");
+                if (text) { return text; }
+            } catch (e) { }
+        }
+        return "";
+    }
+    function parseCountText(text) {
+        text = normalizeText(text);
+        if (!text) { return ""; }
+        const match = text.match(/([\d.,]+(?:\s*[万wW])?)/);
+        return match ? match[1].replace(/\s+/g, "") : text;
+    }
+    function firstCount(selectors, root = document) {
+        for (const selector of selectors) {
+            try {
+                const dom = root.querySelector(selector);
+                const text = parseCountText(dom?.innerText || dom?.textContent || "");
+                if (text) { return text; }
+            } catch (e) { }
+        }
+        return "";
+    }
+    function getLocationInfo() {
+        const url = new URL(location.href);
+        const match = url.pathname.match(/\/(?:explore|discovery\/item)\/([^/?#]+)/i);
+        return {
+            href: url.href,
+            pathname: url.pathname,
+            noteId: url.searchParams.get("noteId") || url.searchParams.get("itemId") || (match ? match[1] : "")
+        };
+    }
+    function parseInitialState() {
+        const scripts = document.querySelectorAll("script");
+        for (const script of scripts) {
+            const text = script.textContent || "";
+            if (!text.includes("__INITIAL_STATE__")) { continue; }
+            const match = text.match(/window\.__INITIAL_STATE__\s*=\s*/);
+            if (!match || match.index == null) { continue; }
+            const startIndex = match.index + match[0].length;
+            const stateText = extractScriptExpression(text, startIndex);
+            if (!stateText) { continue; }
+            const parsedState = parseScriptObject(stateText);
+            if (parsedState) { return parsedState; }
+        }
+        return null;
+    }
+    function extractScriptExpression(text, startIndex) {
+        let index = startIndex;
+        while (index < text.length && /\s/.test(text[index])) {
+            index++;
+        }
+        if (index >= text.length) { return ""; }
+        const startChar = text[index];
+        const pairs = {
+            "{": "}",
+            "[": "]",
+            "(": ")"
+        };
+        const endChar = pairs[startChar];
+        if (!endChar) {
+            const semicolonIndex = text.indexOf(";", index);
+            return (semicolonIndex == -1 ? text.slice(index) : text.slice(index, semicolonIndex)).trim();
+        }
+
+        let depth = 0;
+        let quote = "";
+        let escaped = false;
+        for (let i = index; i < text.length; i++) {
+            const char = text[i];
+            if (quote) {
+                if (escaped) {
+                    escaped = false;
+                    continue;
+                }
+                if (char == "\\") {
+                    escaped = true;
+                    continue;
+                }
+                if (char == quote) {
+                    quote = "";
+                }
+                continue;
+            }
+            if (char == "'" || char == '"' || char == "`") {
+                quote = char;
+                continue;
+            }
+            if (char == startChar) {
+                depth++;
+                continue;
+            }
+            if (char == endChar) {
+                depth--;
+                if (depth == 0) {
+                    return text.slice(index, i + 1).trim();
+                }
+            }
+        }
+        return text.slice(index).trim();
+    }
+    function parseScriptObject(text) {
+        if (!text) { return null; }
+        let source = text.trim();
+        if (source.endsWith(";")) {
+            source = source.slice(0, -1).trim();
+        }
+        source = source.replace(/\\u002F/g, "/");
+        try {
+            return JSON.parse(source);
+        } catch (e) { }
+        try {
+            return Function(`"use strict"; return (${source});`)();
+        } catch (e) { }
+        return null;
+    }
+    function parseJsonLd() {
+        const result = {};
+        const scripts = document.querySelectorAll('script[type="application/ld+json"]');
+        scripts.forEach(function (script) {
+            const parsed = parseScriptObject(script.textContent || "");
+            if (!parsed) { return; }
+            walkObject(parsed, function (node) {
+                if (!node || typeof node != "object") { return; }
+                if (!result.authorName && typeof node.name == "string" && (node["@type"] == "Person" || node["@type"] == "Organization")) {
+                    result.authorName = normalizeText(node.name);
+                }
+                if (!result.authorName && node.author && typeof node.author == "object") {
+                    result.authorName = normalizeText(node.author.name || "");
+                }
+                if (!node.interactionStatistic) { return; }
+                const stats = Array.isArray(node.interactionStatistic) ? node.interactionStatistic : [node.interactionStatistic];
+                stats.forEach(function (item) {
+                    const interactionType = normalizeText(item?.interactionType?.["@type"] || item?.interactionType || "").toLowerCase();
+                    const count = normalizeText(String(item?.userInteractionCount ?? item?.count ?? ""));
+                    if (!count) { return; }
+                    if (!result.likeCount && interactionType.includes("like")) {
+                        result.likeCount = count;
+                    } else if (!result.commentCount && interactionType.includes("comment")) {
+                        result.commentCount = count;
+                    } else if (!result.shareCount && interactionType.includes("share")) {
+                        result.shareCount = count;
+                    }
+                });
+            });
+        });
+        return result;
+    }
+    function walkObject(node, visitor, depth = 0) {
+        if (!node || typeof node != "object" || depth > 10) { return; }
+        visitor(node);
+        if (Array.isArray(node)) {
+            node.forEach(item => walkObject(item, visitor, depth + 1));
+            return;
+        }
+        Object.keys(node).forEach(key => walkObject(node[key], visitor, depth + 1));
+    }
+    function buildXhsMetaFromState(state, noteId) {
+        if (!state || typeof state != "object") { return null; }
+        const candidates = [];
+        walkObject(state, function (node) {
+            if (!node || typeof node != "object") { return; }
+            const interactInfo = node.interactInfo || node.interactionInfo || node.engageInfo;
+            const user = node.user || node.author || node.userInfo;
+            const hasText = typeof node.title == "string" || typeof node.desc == "string";
+            if (!interactInfo && !hasText && !user) { return; }
+            let score = 0;
+            if (interactInfo) { score += 3; }
+            if (hasText) { score += 2; }
+            if (user) { score += 1; }
+            if (noteId && (node.noteId == noteId || node.id == noteId || node.note_id == noteId)) {
+                score += 5;
+            }
+            candidates.push({ node, score });
+        });
+        if (!candidates.length) { return null; }
+        candidates.sort((a, b) => b.score - a.score);
+        const note = candidates[0].node;
+        const interactInfo = note.interactInfo || note.interactionInfo || note.engageInfo || {};
+        const user = note.user || note.author || note.userInfo || {};
+        return {
+            noteId: note.noteId || note.id || note.note_id || noteId || "",
+            noteTitle: normalizeText(note.title || ""),
+            noteDesc: normalizeText(note.desc || note.content || ""),
+            authorName: normalizeText(user.nickname || user.name || user.nickName || ""),
+            likeCount: normalizeText(String(interactInfo.likedCount ?? interactInfo.likeCount ?? "")),
+            collectCount: normalizeText(String(interactInfo.collectedCount ?? interactInfo.collectCount ?? "")),
+            commentCount: normalizeText(String(interactInfo.commentCount ?? "")),
+            shareCount: normalizeText(String(interactInfo.shareCount ?? "")),
+        };
+    }
+    function getXiaohongshuPageMeta() {
+        const locationInfo = getLocationInfo();
+        const detailRoot = document.querySelector("#noteContainer, .note-scroller, .note-content, main") || document;
+        const authorRoot = document.querySelector(".interaction-container .author-container, .author-container, .author-wrapper") || detailRoot;
+        const statsRoot = document.querySelector(".interactions.engage-bar .buttons.engage-bar-style, .interactions.engage-bar, .engage-bar-container .buttons, .engage-bar-container") || detailRoot;
+        const domMeta = {
+            noteId: locationInfo.noteId,
+            noteTitle: firstText([
+                "#detail-title",
+                ".note-scroller #detail-title",
+                ".note-content .title",
+                ".title"
+            ], detailRoot),
+            noteDesc: firstText([
+                "#detail-desc",
+                ".note-scroller #detail-desc",
+                ".desc",
+                ".note-content .desc"
+            ], detailRoot),
+            authorName: firstText([
+                ".author-wrapper .username",
+                ".author-wrapper .name .username",
+                ".author-wrapper .name",
+                ".user-info .name",
+                ".author-wrapper .author-name",
+                ".author-container .name",
+                ".username",
+                "[class*='author'] [class*='name']",
+                "[class*='author'] [class*='user']",
+                "[class*='user'] [class*='name']"
+            ], authorRoot) || firstText([
+                ".author-wrapper .username",
+                ".author-wrapper .name .username",
+                ".author-wrapper .name",
+                ".user-info .name",
+                ".author-wrapper .author-name",
+                ".author-container .name",
+                ".username",
+                "[class*='author'] [class*='name']",
+                "[class*='author'] [class*='user']",
+                "[class*='user'] [class*='name']"
+            ], document),
+            likeCount: firstCount([
+                ".left .like-wrapper .count",
+                ".like-wrapper > .count",
+                ".like-wrapper .count",
+                ".like-wrapper",
+                "[class*='like-wrapper']",
+                "button[class*='like']"
+            ], statsRoot) || firstCount([
+                ".left .like-wrapper .count",
+                ".like-wrapper > .count",
+                ".like-wrapper .count",
+                ".like-wrapper",
+                "[class*='like-wrapper']",
+                "button[class*='like']"
+            ], document),
+            collectCount: firstCount([
+                ".left .collect-wrapper .count",
+                ".collect-wrapper > .count",
+                ".collect-wrapper .count",
+                ".collect-wrapper",
+                "[class*='collect-wrapper']",
+                "button[class*='collect']"
+            ], statsRoot) || firstCount([
+                ".left .collect-wrapper .count",
+                ".collect-wrapper > .count",
+                ".collect-wrapper .count",
+                ".collect-wrapper",
+                "[class*='collect-wrapper']",
+                "button[class*='collect']"
+            ], document),
+            commentCount: firstCount([
+                ".left .chat-wrapper .count",
+                ".chat-wrapper > .count",
+                ".chat-wrapper .count",
+                ".comments-el .total",
+                ".chat-wrapper",
+                "[class*='comment-wrapper']",
+                "[class*='chat-wrapper']",
+                "button[class*='comment']"
+            ], statsRoot == detailRoot ? detailRoot : document) || firstCount([
+                ".left .chat-wrapper .count",
+                ".chat-wrapper > .count",
+                ".chat-wrapper .count",
+                ".comments-el .total",
+                ".chat-wrapper",
+                "[class*='comment-wrapper']",
+                "[class*='chat-wrapper']",
+                "button[class*='comment']"
+            ], document),
+            shareCount: firstCount([
+                ".share-wrapper .count",
+                "[class*='share'] .count",
+                ".share-wrapper",
+                "[class*='share-wrapper']",
+                "button[class*='share']"
+            ], statsRoot) || firstCount([
+                ".share-wrapper .count",
+                "[class*='share'] .count",
+                ".share-wrapper",
+                "[class*='share-wrapper']",
+                "button[class*='share']"
+            ], document)
+        };
+        const stateMeta = buildXhsMetaFromState(parseInitialState(), locationInfo.noteId) || {};
+        const jsonLdMeta = parseJsonLd();
+        const noteDesc = domMeta.noteDesc || stateMeta.noteDesc || firstMeta([
+            'meta[name="description"]',
+            'meta[property="og:description"]'
+        ]);
+        const noteTitle = domMeta.noteTitle || stateMeta.noteTitle || firstMeta([
+            'meta[property="og:title"]',
+            'meta[name="og:title"]'
+        ]) || noteDesc.slice(0, 60);
+        const title = noteTitle || noteDesc || normalizeText(document.title);
+        return {
+            site: "xiaohongshu",
+            pageTitle: normalizeText(document.title),
+            title: title,
+            noteTitle: noteTitle,
+            noteDesc: noteDesc,
+            authorName: domMeta.authorName || stateMeta.authorName || jsonLdMeta.authorName || "",
+            likeCount: domMeta.likeCount || stateMeta.likeCount || jsonLdMeta.likeCount || "",
+            collectCount: domMeta.collectCount || stateMeta.collectCount || "",
+            commentCount: domMeta.commentCount || stateMeta.commentCount || jsonLdMeta.commentCount || "",
+            shareCount: domMeta.shareCount || stateMeta.shareCount || jsonLdMeta.shareCount || "",
+            noteId: domMeta.noteId || stateMeta.noteId || "",
+            pageUrl: locationInfo.href,
+            pagePath: locationInfo.pathname,
+            extractor: [
+                domMeta.noteTitle || domMeta.noteDesc || domMeta.authorName ? "dom" : "",
+                stateMeta.noteTitle || stateMeta.noteDesc || stateMeta.authorName || stateMeta.likeCount || stateMeta.collectCount || stateMeta.commentCount ? "initial_state" : "",
+                jsonLdMeta.authorName || jsonLdMeta.likeCount || jsonLdMeta.commentCount || jsonLdMeta.shareCount ? "json_ld" : ""
+            ].filter(Boolean).join("+") || "fallback",
+            capturedAt: Date.now()
+        };
+    }
+    function getPageMeta() {
+        const hostname = location.hostname || "";
+        if (XHS_HOST_RE.test(hostname)) {
+            return getXiaohongshuPageMeta();
+        }
+        return {
+            site: hostname,
+            pageTitle: normalizeText(document.title),
+            title: normalizeText(document.title),
+            pageUrl: location.href,
+            pagePath: location.pathname,
+            capturedAt: Date.now(),
+            extractor: "default"
+        };
+    }
+    function hasMeaningfulPageMeta(pageMeta) {
+        if (!pageMeta || typeof pageMeta != "object") { return false; }
+        return Boolean(
+            pageMeta.noteTitle ||
+            pageMeta.noteDesc ||
+            pageMeta.authorName ||
+            pageMeta.likeCount ||
+            pageMeta.collectCount ||
+            pageMeta.commentCount ||
+            pageMeta.shareCount ||
+            pageMeta.noteId
+        );
+    }
+    function getPageMetaSignature(pageMeta) {
+        return [
+            pageMeta?.pagePath || "",
+            pageMeta?.noteId || "",
+            pageMeta?.noteTitle || "",
+            pageMeta?.noteDesc || "",
+            pageMeta?.authorName || "",
+            pageMeta?.likeCount || "",
+            pageMeta?.collectCount || "",
+            pageMeta?.commentCount || "",
+            pageMeta?.shareCount || ""
+        ].join("::");
+    }
+    function reportPageMeta(force = false) {
+        if (!XHS_HOST_RE.test(location.hostname || "")) { return false; }
+        const pageMeta = getXiaohongshuPageMeta();
+        if (!hasMeaningfulPageMeta(pageMeta)) { return false; }
+        const signature = getPageMetaSignature(pageMeta);
+        if (!force && signature == xhsLastMetaSignature) {
+            return false;
+        }
+        xhsLastMetaSignature = signature;
+        chrome.runtime.sendMessage({ Message: "updatePageMeta", data: pageMeta }, function () {
+            void chrome.runtime.lastError;
+        });
+        return true;
+    }
+    function schedulePageMetaReport(delay = 180, force = false) {
+        if (!XHS_HOST_RE.test(location.hostname || "")) { return; }
+        clearTimeout(xhsMetaReportTimer);
+        xhsMetaReportTimer = setTimeout(function () {
+            reportPageMeta(force);
+        }, delay);
+    }
+    function watchXiaohongshuPageMeta() {
+        if (xhsMetaObserverStarted || !XHS_HOST_RE.test(location.hostname || "")) { return; }
+        xhsMetaObserverStarted = true;
+
+        const root = document.documentElement || document.body;
+        if (root) {
+            const observer = new MutationObserver(function () {
+                schedulePageMetaReport();
+            });
+            observer.observe(root, {
+                childList: true,
+                subtree: true,
+                characterData: true
+            });
+        }
+
+        const wrapHistoryMethod = function (methodName) {
+            const original = history[methodName];
+            if (typeof original != "function") { return; }
+            history[methodName] = function () {
+                const result = original.apply(this, arguments);
+                xhsLastMetaSignature = "";
+                schedulePageMetaReport(120, true);
+                return result;
+            };
+        };
+        wrapHistoryMethod("pushState");
+        wrapHistoryMethod("replaceState");
+
+        window.addEventListener("popstate", function () {
+            xhsLastMetaSignature = "";
+            schedulePageMetaReport(120, true);
+        });
+        window.addEventListener("hashchange", function () {
+            xhsLastMetaSignature = "";
+            schedulePageMetaReport(120, true);
+        });
+        window.addEventListener("load", function () {
+            schedulePageMetaReport(120, true);
+            setTimeout(function () { schedulePageMetaReport(400, true); }, 400);
+        });
+
+        schedulePageMetaReport(120, true);
+        setTimeout(function () { schedulePageMetaReport(500, true); }, 500);
+        setTimeout(function () { schedulePageMetaReport(1200, true); }, 1200);
+    }
     chrome.runtime.onMessage.addListener(function (Message, sender, sendResponse) {
         if (chrome.runtime.lastError) { return; }
         // 获取页面视频对象
@@ -169,6 +627,10 @@
             sendResponse(document.documentElement.outerHTML);
             return true;
         }
+        if (Message.Message == "getPageMeta") {
+            sendResponse(getPageMeta());
+            return true;
+        }
     });
 
     // Heart Beat
@@ -271,4 +733,5 @@
             return false;
         }
     }
+    watchXiaohongshuPageMeta();
 })();

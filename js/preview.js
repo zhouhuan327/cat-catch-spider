@@ -598,7 +598,11 @@ class FilePreview {
         data._title = data.title;
         data.title = stringModify(data.title);
 
-        data.name = isEmpty(data.name) ? data.title + '.' + data.ext : decodeURIComponent(stringModify(data.name));
+        if (shouldUseMetaMediaName(data)) {
+            data.name = buildDefaultMediaName(data);
+        } else {
+            data.name = isEmpty(data.name) ? buildDefaultMediaName(data) : decodeURIComponent(stringModify(data.name));
+        }
 
         Object.defineProperty(data, "pageDOM", {
             get: () => { return this.sourcePageDOM; }
@@ -1004,6 +1008,24 @@ class FilePreview {
             this.startPreviewGeneration();
         }, 1000);
     }
+    update(data) {
+        const index = this.originalItems.findIndex(item => item.requestId === data.requestId);
+        if (index == -1) {
+            this.push(data);
+            return;
+        }
+        setHeaders(data, null, this.tab.id);
+        const selected = this.originalItems[index].selected;
+        const mergedData = this.trimData({ ...this.originalItems[index], ...data });
+        mergedData.selected = selected;
+        this.originalItems.splice(index, 1, mergedData);
+
+        clearTimeout(this.pushDebounce);
+        this.pushDebounce = setTimeout(() => {
+            this.setupFilters();
+            this.updateFileList();
+        }, 200);
+    }
 
     /**
      * 设置分页
@@ -1108,6 +1130,10 @@ awaitG(() => {
         // 添加资源
         if (Message.Message == "popupAddData") {
             filePreview.push(Message.data);
+            return;
+        }
+        if (Message.Message == "popupUpdateData") {
+            filePreview.update(Message.data);
             return;
         }
     });
