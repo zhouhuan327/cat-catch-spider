@@ -24,6 +24,7 @@
       <li><a href="#anchorCopy" data-i18n="copy" title="copy"></a></li>
       <li><a href="#anchorAria2Rpc" title="Aria2 RPC">Aria2 RPC</a></li>
       <li><a href="#anchorSend2local" data-i18n="send2local" title="send2local"></a></li>
+      <li><a href="#anchorBridge" title="Bridge">Bridge</a></li>
       <li><a href="#anchorM3u8dl" data-i18n="sideurlprotocol" title="URL Protocol m3u8dl"></a></li>
       <li><a href="#anchorInvokeApp" data-i18n="invokeApp" title="invokeApp"></a></li>
       <li><a href="#anchorReplaceTags" data-i18n="replaceTags" title="replaceTags"></a></li>
@@ -330,6 +331,54 @@
               <a href="https://o2bmm.gitbook.io/cat-catch/docs/tag" target="_blank" data-i18n="replaceKeywordList"></a>
             </div>
             <textarea id="send2localBody" save="input" class="width100 break-all" rows="3"></textarea>
+          </div>
+
+          <div class="flex-end">
+            <button type="button" class="resetOption" data-i18n="resetSettings"></button>
+          </div>
+        </div>
+      </div>
+    </section>
+
+    <!-- Bridge 桥接服务 -->
+    <section id="anchorBridge">
+      <h1 class="optionsTitle">
+        <p>Bridge</p>
+      </h1>
+      <div class="optionBox">
+        <span class="explain">
+          本地 HTTP 桥接服务，让外部工具（如 AI 助手）查询嗅探到的媒体并触发下载。
+          启动方式：<code>node bridge/server.js</code>
+        </span>
+        <div class="list">
+          <div class="item">
+            <div><span>启用 Bridge</span></div>
+            <div class="switch">
+              <label class="switchLabel switchRadius">
+                <input type="checkbox" id="bridge" save="click" class="switchInput" />
+                <span class="switchRound switchRadius"><em class="switchRoundBtn switchRadius"></em></span>
+              </label>
+            </div>
+          </div>
+
+          <div class="item">
+            <div><span>推送嗅探到的媒体</span></div>
+            <div class="switch">
+              <label class="switchLabel switchRadius">
+                <input type="checkbox" id="bridgePushMedia" save="click" class="switchInput" />
+                <span class="switchRound switchRadius"><em class="switchRoundBtn switchRadius"></em></span>
+              </label>
+            </div>
+          </div>
+
+          <div class="item">
+            <div><span>Bridge 服务地址</span></div>
+            <input id="bridgeURL" save="input" type="text" class="width100" placeholder="http://127.0.0.1:3399">
+          </div>
+
+          <div class="item">
+            <div><span>轮询间隔（秒）</span></div>
+            <input id="bridgePollInterval" save="input" type="number" min="2" max="60" style="width: 80px">
           </div>
 
           <div class="flex-end">

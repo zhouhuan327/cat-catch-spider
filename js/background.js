@@ -35,6 +35,85 @@ chrome.alarms.onAlarm.addListener(function (alarm) {
     }
 });
 
+/**
+ * 向桥接服务推送一条媒体信息
+ * @param {Object} info 媒体对象
+ */
+function bridgePushMedia(info) {
+    if (!G.bridge || !G.bridgePushMedia) return;
+    const payload = {
+        url: info.url,
+        title: info.title,
+        ext: info.ext,
+        type: info.type,
+        size: info.size,
+        duration: info.duration,
+        name: info.name,
+        tabId: info.tabId,
+        pageUrl: info.pageUrl,
+        requestHeaders: info.requestHeaders,
+    };
+    fetch(G.bridgeURL + "/media", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(payload),
+    }).catch(() => { /* 桥接服务未启动时静默忽略 */ });
+}
+
+/**
+ * 轮询桥接服务的下载队列，取到任务后触发下载
+ */
+function bridgePollQueue() {
+    if (!G.bridge) return;
+    fetch(G.bridgeURL + "/download-queue")
+        .then(r => r.json())
+        .then(function (data) {
+            if (!data.tasks || !data.tasks.length) return;
+            for (const task of data.tasks) {
+                bridgeExecuteDownload(task);
+            }
+        })
+        .catch(() => { /* 桥接服务未启动时静默忽略 */ });
+}
+
+/**
+ * 执行一条桥接下来的下载任务
+ * @param {Object} task { url, title, ext, type, headers }
+ */
+function bridgeExecuteDownload(task) {
+    if (!task.url) return;
+    // m3u8 / mpd 走解析页
+    const ext = (task.ext || "").toLowerCase();
+    const isStream = ext === "m3u8" || ext === "mpd" || task.url.includes(".m3u8") || task.url.includes(".mpd");
+    if (isStream) {
+        openParser(task);
+        return;
+    }
+    // 普通文件直接触发浏览器下载
+    const fileName = task.title ? task.title + (ext ? "." + ext : "") : undefined;
+    chrome.downloads.download({
+        url: task.url,
+        filename: fileName,
+    });
+}
+
+// bridge 轮询定时器（setInterval，支持 <1min 的间隔）
+var bridgePollTimer = null;
+
+/**
+ * 根据 bridgePollInterval 配置启动/停止轮询定时器
+ * Service Worker 存活期间有效；每次 SW 被唤醒后 init 会重新调用
+ */
+function bridgeSetupPoll() {
+    if (bridgePollTimer) {
+        clearInterval(bridgePollTimer);
+        bridgePollTimer = null;
+    }
+    if (!G.bridge) return;
+    const ms = Math.max(2, G.bridgePollInterval || 5) * 1000;
+    bridgePollTimer = setInterval(bridgePollQueue, ms);
+}
+
 // onBeforeRequest 浏览器发送请求之前使用正则匹配发送请求的URL
 // chrome.webRequest.onBeforeRequest.addListener(
 //     function (data) {
@@ -280,6 +359,9 @@ function findMedia(data, isRegex = false, filter = false, timer = false) {
                 try { send2local("catch", { ...info, requestHeaders: data.allRequestHeaders }, info.tabId); } catch (e) { console.log(e); }
             }
 
+            // 推送到桥接服务
+            bridgePushMedia({ ...info, requestHeaders: data.allRequestHeaders });
+
             // 储存数据
             cacheData[info.tabId] ??= [];
             cacheData[info.tabId].push(info);
@@ -336,11 +418,6 @@ function hasPreferredXhsPageMeta(pageMeta) {
 function getTabPageMeta(tabId, webInfo, callback) {
     if (!tabId || tabId <= 0 || !shouldCapturePageMeta(webInfo?.url)) {
         callback(false);
-        return;
-    }
-    const cache = G.pageMetaCache.get(tabId);
-    if (cache && (Date.now() - cache.time) <= 3000 && (cache.url == webInfo.url || cache.data?.pageUrl == webInfo.url || !webInfo?.url)) {
-        callback(cache.data);
         return;
     }
     let retryCount = 0;
@@ -559,6 +636,14 @@ chrome.runtime.onMessage.addListener(function (Message, sender, sendResponse) {
             data: pageMeta
         });
         sendResponse({ updated: updateCachedMediaWithPageMeta(tabId, pageMeta).length });
+        return true;
+    }
+    if (Message.Message == "clearPageMeta") {
+        const tabId = sender?.tab?.id ?? Message.tabId;
+        if (tabId) {
+            G.pageMetaCache.delete(tabId);
+        }
+        sendResponse("ok");
         return true;
     }
     // 获取所有数据

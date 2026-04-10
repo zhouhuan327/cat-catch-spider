@@ -195,6 +195,11 @@ G.OptionLists = {
     getHtmlDOM: false,
     damn: false,
     iframeFFmpeg: false,
+    // Bridge 桥接服务配置
+    bridge: false,                          // 是否启用桥接服务
+    bridgeURL: "http://127.0.0.1:3399",     // 桥接服务地址
+    bridgePollInterval: 5,                  // 轮询下载队列间隔（秒）
+    bridgePushMedia: true,                  // 嗅探到媒体时自动推送到桥接服务
 };
 
 // 本地储存的配置
@@ -344,6 +349,8 @@ function InitOptions() {
         items.featAutoDownTabId = new Set(items.featAutoDownTabId);
         G = { ...items, ...G };
         G.initLocalComplete = true;
+        // 初始化完成后启动 bridge 轮询（如果已启用）
+        if (typeof bridgeSetupPoll === "function") bridgeSetupPoll();
     });
 }
 // 监听变化，新值给全局变量
@@ -399,6 +406,10 @@ chrome.storage.onChanged.addListener(function (changes, namespace) {
             continue;
         }
         G[key] = newValue;
+        // bridge 相关配置变化时重新设置轮询
+        if (key === "bridge" || key === "bridgePollInterval" || key === "bridgeURL") {
+            if (typeof bridgeSetupPoll === "function") bridgeSetupPoll();
+        }
     }
 });
 

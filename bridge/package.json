@@ -1,0 +1,13 @@
+{
+  "name": "cat-catch-bridge",
+  "version": "1.0.0",
+  "description": "Local HTTP bridge for cat-catch-spider extension",
+  "main": "server.js",
+  "scripts": {
+    "start": "node server.js",
+    "start:3399": "node server.js --port 3399"
+  },
+  "engines": {
+    "node": ">=16"
+  }
+}
