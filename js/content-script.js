@@ -216,9 +216,11 @@
     }
     function getXiaohongshuPageMeta() {
         const locationInfo = getLocationInfo();
-        const detailRoot = document.querySelector("#noteContainer, .note-scroller, .note-content, main") || document;
-        const authorRoot = document.querySelector(".interaction-container .author-container, .author-container, .author-wrapper") || detailRoot;
-        const statsRoot = document.querySelector(".interactions.engage-bar .buttons.engage-bar-style, .interactions.engage-bar, .engage-bar-container .buttons, .engage-bar-container") || detailRoot;
+        // 弹窗笔记详情容器优先，避免取到列表页其他笔记卡片的信息
+        const noteContainer = document.querySelector(".noteContainer, #noteContainer");
+        const detailRoot = noteContainer || document.querySelector(".note-scroller, .note-content") || document;
+        const authorRoot = detailRoot.querySelector(".author-container, .author-wrapper") || detailRoot;
+        const statsRoot = detailRoot.querySelector(".interactions.engage-bar .buttons.engage-bar-style, .interactions.engage-bar, .engage-bar-container .buttons, .engage-bar-container") || detailRoot;
         const domMeta = {
             noteId: locationInfo.noteId,
             noteTitle: firstText([
@@ -255,7 +257,7 @@
                 "[class*='author'] [class*='name']",
                 "[class*='author'] [class*='user']",
                 "[class*='user'] [class*='name']"
-            ], document),
+            ], detailRoot),
             likeCount: firstCount([
                 ".left .like-wrapper .count",
                 ".like-wrapper > .count",
@@ -270,7 +272,7 @@
                 ".like-wrapper",
                 "[class*='like-wrapper']",
                 "button[class*='like']"
-            ], document),
+            ], detailRoot),
             collectCount: firstCount([
                 ".left .collect-wrapper .count",
                 ".collect-wrapper > .count",
@@ -285,7 +287,7 @@
                 ".collect-wrapper",
                 "[class*='collect-wrapper']",
                 "button[class*='collect']"
-            ], document),
+            ], detailRoot),
             commentCount: firstCount([
                 ".left .chat-wrapper .count",
                 ".chat-wrapper > .count",
@@ -295,7 +297,7 @@
                 "[class*='comment-wrapper']",
                 "[class*='chat-wrapper']",
                 "button[class*='comment']"
-            ], statsRoot == detailRoot ? detailRoot : document) || firstCount([
+            ], statsRoot) || firstCount([
                 ".left .chat-wrapper .count",
                 ".chat-wrapper > .count",
                 ".chat-wrapper .count",
@@ -304,7 +306,7 @@
                 "[class*='comment-wrapper']",
                 "[class*='chat-wrapper']",
                 "button[class*='comment']"
-            ], document),
+            ], detailRoot),
             shareCount: firstCount([
                 ".share-wrapper .count",
                 "[class*='share'] .count",
@@ -317,7 +319,7 @@
                 ".share-wrapper",
                 "[class*='share-wrapper']",
                 "button[class*='share']"
-            ], document)
+            ], detailRoot)
         };
         const stateMeta = buildXhsMetaFromState(parseInitialState(), locationInfo.noteId) || {};
         const jsonLdMeta = parseJsonLd();
@@ -407,6 +409,12 @@
         });
         return true;
     }
+    function clearPageMetaCache() {
+        if (!XHS_HOST_RE.test(location.hostname || "")) { return; }
+        chrome.runtime.sendMessage({ Message: "clearPageMeta" }, function () {
+            void chrome.runtime.lastError;
+        });
+    }
     function schedulePageMetaReport(delay = 180, force = false) {
         if (!XHS_HOST_RE.test(location.hostname || "")) { return; }
         clearTimeout(xhsMetaReportTimer);
@@ -435,6 +443,7 @@
             if (typeof original != "function") { return; }
             history[methodName] = function () {
                 const result = original.apply(this, arguments);
+                clearPageMetaCache();
                 xhsLastMetaSignature = "";
                 schedulePageMetaReport(120, true);
                 return result;
@@ -444,18 +453,22 @@
         wrapHistoryMethod("replaceState");
 
         window.addEventListener("popstate", function () {
+            clearPageMetaCache();
             xhsLastMetaSignature = "";
             schedulePageMetaReport(120, true);
         });
         window.addEventListener("hashchange", function () {
+            clearPageMetaCache();
             xhsLastMetaSignature = "";
             schedulePageMetaReport(120, true);
         });
         window.addEventListener("load", function () {
+            clearPageMetaCache();
             schedulePageMetaReport(120, true);
             setTimeout(function () { schedulePageMetaReport(400, true); }, 400);
         });
 
+        clearPageMetaCache();
         schedulePageMetaReport(120, true);
         setTimeout(function () { schedulePageMetaReport(500, true); }, 500);
         setTimeout(function () { schedulePageMetaReport(1200, true); }, 1200);
