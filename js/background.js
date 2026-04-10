@@ -456,7 +456,16 @@ function getTabPageMeta(tabId, webInfo, callback) {
 }
 function shouldUpdateMediaWithPageMeta(info, pageMeta) {
     if (!info || !pageMeta || pageMeta.site != "xiaohongshu") { return false; }
+    // 两边都有 noteId 且不同，明确不属于同一笔记
     if (info.noteId && pageMeta.noteId && info.noteId != pageMeta.noteId) { return false; }
+    // pageMeta 有 noteId 但 info 没有：
+    // - 若 info 已有其他有效 meta，说明属于另一个笔记，不覆盖
+    // - 若 info 完全没有 meta 但 pageUrl 指向不同笔记，也不覆盖
+    if (pageMeta.noteId && !info.noteId) {
+        if (hasPreferredXhsPageMeta(info)) { return false; }
+        const infoNoteId = info.pageUrl && info.pageUrl.match(/\/(?:explore|discovery\/item)\/([^/?#]+)/i)?.[1];
+        if (infoNoteId && infoNoteId != pageMeta.noteId) { return false; }
+    }
     const missingMeta = !info.noteTitle && !info.noteDesc && !info.authorName && !info.likeCount && !info.collectCount && !info.commentCount && !info.shareCount;
     const hasRicherMeta = Boolean(
         (pageMeta.authorName && pageMeta.authorName != info.authorName) ||
