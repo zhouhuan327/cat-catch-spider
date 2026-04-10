@@ -423,34 +423,65 @@ function getTabPageMeta(tabId, webInfo, callback) {
     let retryCount = 0;
     const maxRetry = 20;
     const retryDelay = 400;
+    // 向指定 frameId 发消息，返回 Promise<pageMeta|null>
+    const fetchFromFrame = function (frameId) {
+        return new Promise(function (resolve) {
+            const options = frameId != null ? { frameId } : {};
+            chrome.tabs.sendMessage(tabId, { Message: "getPageMeta" }, options, function (pageMeta) {
+                if (chrome.runtime.lastError || !pageMeta || typeof pageMeta != "object") {
+                    resolve(null);
+                } else {
+                    resolve(pageMeta);
+                }
+            });
+        });
+    };
     const tryFetch = function () {
-        chrome.tabs.sendMessage(tabId, { Message: "getPageMeta" }, { frameId: 0 }, function (pageMeta) {
-            const hasError = chrome.runtime.lastError || !pageMeta || typeof pageMeta != "object";
-            const hasMeta = !hasError && hasMeaningfulPageMeta(pageMeta);
-            const hasPreferredMeta = !hasError && hasPreferredXhsPageMeta(pageMeta);
-            if (hasPreferredMeta || (hasMeta && retryCount >= maxRetry - 1)) {
-                G.pageMetaCache.set(tabId, {
-                    url: webInfo?.url,
-                    time: Date.now(),
-                    data: pageMeta
-                });
+        // 先问主框架（frameId:0），拿不到 preferred meta 时再遍历所有子框架
+        fetchFromFrame(0).then(function (pageMeta) {
+            if (hasPreferredXhsPageMeta(pageMeta)) {
+                G.pageMetaCache.set(tabId, { url: webInfo?.url, time: Date.now(), data: pageMeta });
                 callback(pageMeta);
                 return;
             }
-            retryCount++;
-            if (retryCount >= maxRetry) {
-                callback({
-                    site: "xiaohongshu",
-                    pageUrl: webInfo?.url,
-                    pageTitle: webInfo?.title || "",
-                    title: webInfo?.title || "",
-                    extractor: "missing",
-                    metaStatus: "missing"
+            // 主框架没有，查子框架（XHS 详情弹窗在同源 iframe 内）
+            chrome.webNavigation.getAllFrames({ tabId }, function (frames) {
+                if (chrome.runtime.lastError || !frames) {
+                    finalize(pageMeta);
+                    return;
+                }
+                const subFrames = frames.filter(f => f.frameId !== 0);
+                if (!subFrames.length) { finalize(pageMeta); return; }
+                Promise.all(subFrames.map(f => fetchFromFrame(f.frameId))).then(function (results) {
+                    const best = results.find(r => hasPreferredXhsPageMeta(r))
+                        || results.find(r => hasMeaningfulPageMeta(r))
+                        || pageMeta;
+                    finalize(best);
                 });
-                return;
-            }
-            setTimeout(tryFetch, retryDelay);
+            });
         });
+    };
+    const finalize = function (pageMeta) {
+        const hasMeta = hasMeaningfulPageMeta(pageMeta);
+        const hasPreferredMeta = hasPreferredXhsPageMeta(pageMeta);
+        if (hasPreferredMeta || (hasMeta && retryCount >= maxRetry - 1)) {
+            G.pageMetaCache.set(tabId, { url: webInfo?.url, time: Date.now(), data: pageMeta });
+            callback(pageMeta);
+            return;
+        }
+        retryCount++;
+        if (retryCount >= maxRetry) {
+            callback({
+                site: "xiaohongshu",
+                pageUrl: webInfo?.url,
+                pageTitle: webInfo?.title || "",
+                title: webInfo?.title || "",
+                extractor: "missing",
+                metaStatus: "missing"
+            });
+            return;
+        }
+        setTimeout(tryFetch, retryDelay);
     };
     tryFetch();
 }
